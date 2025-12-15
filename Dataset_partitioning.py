@@ -105,11 +105,13 @@ def copy_img(source_jpg_path, img_path, image_id):
     shutil.copyfile(os.path.join(source_jpg_path, f'{image_id}.jpg'), os.path.join(img_path, f'{image_id}.jpg'))
 
 
-def xml2txt(source_path, out_path):
+def xml2txt(source_path, out_path, xml_deep: str = None):
     seg_path = os.path.join(out_path, 'seg')
     img_path = os.path.join(out_path, 'images')
     source_jpg_path = os.path.join(source_path, 'JPEGImages')
     xml_path = os.path.join(source_path, 'Annotations')
+    if xml_deep is not None:
+        xml_path = os.path.join(xml_path, xml_deep)
     txt_path = os.path.join(out_path, 'label')
     if not os.path.exists(txt_path):
         os.makedirs(txt_path)
@@ -127,7 +129,7 @@ def xml2txt(source_path, out_path):
 
 def split_dataset(source, output, xml_deep):
     seg_img_type(source, output, train_val_percent=1, xml_deep=xml_deep)
-    xml2txt(source, output)
+    xml2txt(source, output, xml_deep)
 
 
 if __name__ == '__main__':
