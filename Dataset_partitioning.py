@@ -11,23 +11,23 @@ classes = ['airplane', 'airport', 'baseballfield', 'basketballcourt', 'bridge', 
            'overpass', 'ship', 'stadium', 'storagetank', 'tenniscourt', 'trainstation', 'vehicle', 'windmill']
 
 
-def seg_img_type(xml_path, txt_path, source_images_path, train_val_percent=0.9, train_percent=0.7,
+def seg_img_type(xml_path, txt_path, source_images_path: str, train_val_percent=0.9, train_percent=0.7,
                  xml_deep: str = None):
     """
     XML文件按照一定的比例分成train、val、test三个数据集
     train_val_percent  表示的是train+val之和。若不需要test集则改为1
     train_percent 代表拿来训练的比例
     """
+    source_jpg_path = os.path.join(xml_path, source_images_path)
+    jpg_list = os.listdir(source_jpg_path)
     xml_path = os.path.join(xml_path, 'Annotations')
     if xml_deep is not None:
         xml_path = os.path.join(xml_path, xml_deep)
     txt_path = os.path.join(txt_path, 'seg')
     total_xml = os.listdir(xml_path)
     xml_num_list = [i.split('.')[0] for i in total_xml]
-    source_jpg_path = os.path.join(xml_path, source_images_path)
-    jpg_list = os.listdir(source_jpg_path)
     jpg_num_list = [i.split('.')[0] for i in jpg_list]
-    xml_exists_list = [i for i in total_xml if i in jpg_num_list]
+    xml_exists_list = [i for i in xml_num_list if i in jpg_num_list]
     if not os.path.exists(txt_path):
         os.makedirs(txt_path)
     num = len(xml_exists_list)
