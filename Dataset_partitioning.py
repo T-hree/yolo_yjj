@@ -31,28 +31,27 @@ def seg_img_type(xml_path, txt_path, source_images_path: str, train_val_percent=
     if not os.path.exists(txt_path):
         os.makedirs(txt_path)
     num = len(xml_exists_list)
-    list_index = range(num)
     tv = int(num * train_val_percent)
     tr = int(tv * train_percent)
-    trainval = random.sample(list_index, tv)
-    train = random.sample(trainval, tr)
+    trainval_list = random.sample(xml_exists_list, tv)
+    train_list = random.sample(trainval_list, tr)
+    val_list = [i for i in trainval_list if i not in train_list]
+    test_list = [i for i in xml_exists_list if i not in trainval_list]
 
     file_trainval = open(txt_path + '/trainval.txt', 'w')
     file_test = open(txt_path + '/test.txt', 'w')
     file_train = open(txt_path + '/train.txt', 'w')
     file_val = open(txt_path + '/val.txt', 'w')
 
-    for i in list_index:
-        name = total_xml[i][:-4] + '\n'
-        if i in trainval:
-            file_trainval.write(name)
-            if i in train:
-                file_train.write(name)
-            else:
-                file_val.write(name)
-        else:
-            file_test.write(name)
-
+    for i in tqdm(trainval_list):
+        file_trainval.write(i + '\n')
+    for i in tqdm(train_list):
+        file_train.write(i + '\n')
+    for i in tqdm(val_list):
+        file_val.write(i + '\n')
+    for i in tqdm(test_list):
+        file_test.write(i + '\n')
+        
     file_trainval.close()
     file_train.close()
     file_val.close()
