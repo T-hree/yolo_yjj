@@ -51,7 +51,7 @@ def seg_img_type(xml_path, txt_path, source_images_path: str, train_val_percent=
         file_val.write(i + '\n')
     for i in tqdm(test_list):
         file_test.write(i + '\n')
-        
+
     file_trainval.close()
     file_train.close()
     file_val.close()
@@ -106,8 +106,12 @@ def convert_annotation(xml_path, txt_path, image_id, is_difficult=True):
                        " ".join([str(a) for a in bb]) + '\n')
 
 
-def copy_img(source_jpg_path, img_path, image_id):
-    shutil.copyfile(os.path.join(source_jpg_path, f'{image_id}.jpg'), os.path.join(img_path, f'{image_id}.jpg'))
+def copy_img(source_jpg_path, image_set, img_path, image_id):
+    image_set_path = os.path.join(img_path, image_set)
+    if not os.path.exists(image_set_path):
+        os.makedirs(image_set_path)
+    shutil.copyfile(os.path.join(source_jpg_path, f'{image_id}.jpg'),
+                    os.path.join(img_path, image_set, f'{image_id}.jpg'))
 
 
 def xml2txt(source_path, out_path, source_images_path, xml_deep: str = None, is_difficult=True):
@@ -128,7 +132,7 @@ def xml2txt(source_path, out_path, source_images_path, xml_deep: str = None, is_
         for image_id in tqdm(image_ids):
             list_file.write(os.path.join(img_path, f'{image_id}.jpg\n'))
             convert_annotation(xml_path, txt_path, image_id, is_difficult)
-            copy_img(source_jpg_path, img_path, image_id)
+            copy_img(source_jpg_path, image_set, img_path, image_id)
         list_file.close()
 
 
