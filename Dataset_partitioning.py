@@ -72,7 +72,7 @@ def convert(size, box):
     return x, y, w, h
 
 
-def convert_annotation(xml_path, txt_path, image_id):
+def convert_annotation(xml_path, txt_path, image_id, is_difficult=True):
     in_file = open(os.path.join(xml_path, f'{image_id}.xml'), 'r', encoding='utf-8', )
     out_file = open(os.path.join(txt_path, f'{image_id}.txt'), 'w', encoding='utf-8')
     tree = ET.parse(in_file)
@@ -81,10 +81,11 @@ def convert_annotation(xml_path, txt_path, image_id):
     w = int(size.find('width').text)
     h = int(size.find('height').text)
     for obj in root.iter('object'):
-        difficult = obj.find('difficult').text
         cls = obj.find('name').text
-        if cls not in classes or int(difficult) == 1:
-            continue
+        if is_difficult:
+            difficult = obj.find('difficult').text
+            if cls not in classes or int(difficult) == 1:
+                continue
         cls_id = classes.index(cls)
         xmlbox = obj.find('bndbox')
         b = (float(xmlbox.find('xmin').text), float(xmlbox.find('xmax').text), float(xmlbox.find('ymin').text),
@@ -105,7 +106,7 @@ def copy_img(source_jpg_path, img_path, image_id):
     shutil.copyfile(os.path.join(source_jpg_path, f'{image_id}.jpg'), os.path.join(img_path, f'{image_id}.jpg'))
 
 
-def xml2txt(source_path, out_path, xml_deep: str = None):
+def xml2txt(source_path, out_path, xml_deep: str = None, is_difficult=True):
     seg_path = os.path.join(out_path, 'seg')
     img_path = os.path.join(out_path, 'images')
     source_jpg_path = os.path.join(source_path, 'JPEGImages')
@@ -122,17 +123,40 @@ def xml2txt(source_path, out_path, xml_deep: str = None):
         list_file = open(os.path.join(out_path, f'{image_set}.txt'), 'w')
         for image_id in tqdm(image_ids):
             list_file.write(os.path.join(img_path, f'{image_id}.jpg\n'))
-            convert_annotation(xml_path, txt_path, image_id)
+            convert_annotation(xml_path, txt_path, image_id, is_difficult)
             copy_img(source_jpg_path, img_path, image_id)
         list_file.close()
 
 
-def split_dataset(source, output, xml_deep):
+def split_dataset(source, output, xml_deep, is_difficult=True):
     seg_img_type(source, output, train_val_percent=1, xml_deep=xml_deep)
-    xml2txt(source, output, xml_deep)
+    xml2txt(source, output, xml_deep, is_difficult)
 
 
 if __name__ == '__main__':
     source_dir = '/home/yjj/data/OpenDataLab___DIOR/raw/DIOR'
     output_dir = 'Datasets'
-    split_dataset(source_dir, output_dir, xml_deep='Horizontal Bounding Boxes')
+    split_dataset(source_dir, output_dir, xml_deep='Horizontal Bounding Boxes', is_difficult=False)
+    """
+    <annotation>
+        <filename>00001.jpg</filename>
+        <source>
+                <database>DIOR</database>
+        </source>
+        <size>
+                <width>800</width>
+                <height>800</height>
+                <depth>3</depth>
+        </size>
+        <segmented>0</segmented>
+        <object>
+                <name>golffield</name>
+                <pose>Unspecified</pose>
+                <bndbox>
+                        <xmin>133</xmin>
+                        <ymin>237</ymin>
+                        <xmax>684</xmax>
+                        <ymax>672</ymax>
+                </bndbox>
+        </object>
+</annotation>"""
