@@ -106,10 +106,10 @@ def copy_img(source_jpg_path, img_path, image_id):
     shutil.copyfile(os.path.join(source_jpg_path, f'{image_id}.jpg'), os.path.join(img_path, f'{image_id}.jpg'))
 
 
-def xml2txt(source_path, out_path, xml_deep: str = None, is_difficult=True):
+def xml2txt(source_path, out_path,source_images_path, xml_deep: str = None, is_difficult=True):
     seg_path = os.path.join(out_path, 'seg')
     img_path = os.path.join(out_path, 'images')
-    source_jpg_path = os.path.join(source_path, 'JPEGImages')
+    source_jpg_path = os.path.join(source_path, source_images_path)
     xml_path = os.path.join(source_path, 'Annotations')
     if xml_deep is not None:
         xml_path = os.path.join(xml_path, xml_deep)
@@ -128,35 +128,12 @@ def xml2txt(source_path, out_path, xml_deep: str = None, is_difficult=True):
         list_file.close()
 
 
-def split_dataset(source, output, xml_deep, is_difficult=True):
+def split_dataset(source, output,source_images_path, xml_deep, is_difficult=True):
     seg_img_type(source, output, train_val_percent=1, xml_deep=xml_deep)
-    xml2txt(source, output, xml_deep, is_difficult)
+    xml2txt(source, output, source_images_path, xml_deep, is_difficult)
 
 
 if __name__ == '__main__':
     source_dir = '/home/yjj/data/OpenDataLab___DIOR/raw/DIOR'
     output_dir = 'Datasets'
-    split_dataset(source_dir, output_dir, xml_deep='Horizontal Bounding Boxes', is_difficult=False)
-    """
-    <annotation>
-        <filename>00001.jpg</filename>
-        <source>
-                <database>DIOR</database>
-        </source>
-        <size>
-                <width>800</width>
-                <height>800</height>
-                <depth>3</depth>
-        </size>
-        <segmented>0</segmented>
-        <object>
-                <name>golffield</name>
-                <pose>Unspecified</pose>
-                <bndbox>
-                        <xmin>133</xmin>
-                        <ymin>237</ymin>
-                        <xmax>684</xmax>
-                        <ymax>672</ymax>
-                </bndbox>
-        </object>
-</annotation>"""
+    split_dataset(source_dir, output_dir, "JPEGImages-trainval", xml_deep='Horizontal Bounding Boxes', is_difficult=False)
