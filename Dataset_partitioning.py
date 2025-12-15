@@ -19,7 +19,7 @@ def seg_img_type(xml_path, txt_path, train_val_percent=0.9, train_percent=0.7, x
     """
     xml_path = os.path.join(xml_path, 'Annotations')
     if xml_deep is not None:
-        xml_path = os.path.join(xml_deep, xml_deep)
+        xml_path = os.path.join(xml_path, xml_deep)
     txt_path = os.path.join(txt_path, 'seg')
     total_xml = os.listdir(xml_path)
 
