@@ -38,7 +38,7 @@ head:
   - [-1, 1, nn.Upsample, [None, 2, "nearest"]]
   - [[-1, 4], 1, Concat, [1]] # cat backbone P3
   - [-1, 2, C3k2, [256, False]] # 16 (P3/8-small)
-  -
+
   - [ -1, 1, nn.Upsample, [ None, 2, "nearest" ] ] # 17 P3 -> P2
   - [ [ -1, 2 ], 1, Concat, [ 1 ] ] # 18 cat backbone P2 (引用第2层)
   - [ -1, 2, C3k2, [ 128, False ] ] # 19 (P2/4-tiny 特征图生成完毕)
