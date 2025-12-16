@@ -76,8 +76,11 @@ def convert(size, box):
     return x, y, w, h
 
 
-def convert_annotation(xml_path, txt_path, image_id, is_difficult=True):
+def convert_annotation(xml_path, txt_path, image_set:str, image_id, is_difficult=True):
     in_file = open(os.path.join(xml_path, f'{image_id}.xml'), 'r', encoding='utf-8', )
+    txt_path = os.path.join(txt_path, image_set)
+    if not os.path.exists(txt_path):
+        os.makedirs(txt_path)
     out_file = open(os.path.join(txt_path, f'{image_id}.txt'), 'w', encoding='utf-8')
     tree = ET.parse(in_file)
     root = tree.getroot()
@@ -121,7 +124,7 @@ def xml2txt(source_path, out_path, source_images_path, xml_deep: str = None, is_
     xml_path = os.path.join(source_path, 'Annotations')
     if xml_deep is not None:
         xml_path = os.path.join(xml_path, xml_deep)
-    txt_path = os.path.join(out_path, 'label')
+    txt_path = os.path.join(out_path, 'labels')
     if not os.path.exists(txt_path):
         os.makedirs(txt_path)
     if not os.path.exists(img_path):
@@ -131,7 +134,7 @@ def xml2txt(source_path, out_path, source_images_path, xml_deep: str = None, is_
         list_file = open(os.path.join(out_path, f'{image_set}.txt'), 'w')
         for image_id in tqdm(image_ids):
             list_file.write(os.path.join(img_path, f'{image_id}.jpg\n'))
-            convert_annotation(xml_path, txt_path, image_id, is_difficult)
+            convert_annotation(xml_path, txt_path, image_set, image_id, is_difficult)
             copy_img(source_jpg_path, image_set, img_path, image_id)
         list_file.close()
 
