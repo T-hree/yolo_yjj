@@ -13,7 +13,7 @@ from ultralytics.utils.ops import crop_mask, xywh2xyxy, xyxy2xywh
 from ultralytics.utils.tal import RotatedTaskAlignedAssigner, TaskAlignedAssigner, dist2bbox, dist2rbox, make_anchors
 from ultralytics.utils.torch_utils import autocast
 
-from .metrics import bbox_iou, probiou
+from .metrics import bbox_iou, probiou, nwd_loss
 from .tal import bbox2dist
 
 
@@ -100,8 +100,8 @@ class DFLoss(nn.Module):
         wl = tr - target  # weight left
         wr = 1 - wl  # weight right
         return (
-            F.cross_entropy(pred_dist, tl.view(-1), reduction="none").view(tl.shape) * wl
-            + F.cross_entropy(pred_dist, tr.view(-1), reduction="none").view(tl.shape) * wr
+                F.cross_entropy(pred_dist, tl.view(-1), reduction="none").view(tl.shape) * wl
+                + F.cross_entropy(pred_dist, tr.view(-1), reduction="none").view(tl.shape) * wr
         ).mean(-1, keepdim=True)
 
 
@@ -114,19 +114,47 @@ class BboxLoss(nn.Module):
         self.dfl_loss = DFLoss(reg_max) if reg_max > 1 else None
 
     def forward(
-        self,
-        pred_dist: torch.Tensor,
-        pred_bboxes: torch.Tensor,
-        anchor_points: torch.Tensor,
-        target_bboxes: torch.Tensor,
-        target_scores: torch.Tensor,
-        target_scores_sum: torch.Tensor,
-        fg_mask: torch.Tensor,
+            self,
+            pred_dist: torch.Tensor,
+            pred_bboxes: torch.Tensor,
+            anchor_points: torch.Tensor,
+            target_bboxes: torch.Tensor,
+            target_scores: torch.Tensor,
+            target_scores_sum: torch.Tensor,
+            fg_mask: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Compute IoU and DFL losses for bounding boxes."""
         weight = target_scores.sum(-1)[fg_mask].unsqueeze(-1)
-        iou = bbox_iou(pred_bboxes[fg_mask], target_bboxes[fg_mask], xywh=False, CIoU=True)
-        loss_iou = ((1.0 - iou) * weight).sum() / target_scores_sum
+        # iou = bbox_iou(pred_bboxes[fg_mask], target_bboxes[fg_mask], xywh=False, CIoU=True)
+        # loss_iou = ((1.0 - iou) * weight).sum() / target_scores_sum
+
+        # ================= 修改开始 =================
+
+        # 1. 获取正样本的预测框和真实框
+        pbox = pred_bboxes[fg_mask]
+        tbox = target_bboxes[fg_mask]
+
+        # 2. 计算原有的 CIoU (保留它，作为基础回归)
+        iou = bbox_iou(pbox, tbox, xywh=False, CIoU=True)
+
+        # 3. 计算 NWD Loss (针对小目标优化)
+        # 注意：pred_bboxes 和 target_bboxes 在这里通常是 xyxy 格式，所以 xywh=False
+        nwd = nwd_loss(pbox, tbox, xywh=False)
+
+        # if torch.rand(1) < 0.1:
+        #     print(f"\n[DEBUG] NWD Loss Check:")
+        #     print(f"   -> CIoU Mean: {iou.mean().item():.4f}")  # 原来的 Loss 均值
+        #     print(f"   -> NWD  Mean: {nwd.mean().item():.4f}")  # 你的新 Loss 均值
+        #     print(f"   -> NWD  Min:  {nwd.min().item():.4f}, Max: {nwd.max().item():.4f}")  # 看看有没有梯度爆炸或消失
+        # 4. 融合 Loss
+        # 策略：简单的加权融合。
+        # 你可以调节 nwd_ratio。对于小目标，NWD 很重要。
+        # 0.5 * CIoU_Loss + 0.5 * NWD_Loss
+        nwd_ratio = 0.5
+        loss_iou = ((1.0 - iou) * (1 - nwd_ratio) + nwd * nwd_ratio) * weight
+        loss_iou = loss_iou.sum() / target_scores_sum
+
+        # ================= 修改结束 =================
 
         # DFL loss
         if self.dfl_loss:
@@ -147,14 +175,14 @@ class RotatedBboxLoss(BboxLoss):
         super().__init__(reg_max)
 
     def forward(
-        self,
-        pred_dist: torch.Tensor,
-        pred_bboxes: torch.Tensor,
-        anchor_points: torch.Tensor,
-        target_bboxes: torch.Tensor,
-        target_scores: torch.Tensor,
-        target_scores_sum: torch.Tensor,
-        fg_mask: torch.Tensor,
+            self,
+            pred_dist: torch.Tensor,
+            pred_bboxes: torch.Tensor,
+            anchor_points: torch.Tensor,
+            target_bboxes: torch.Tensor,
+            target_scores: torch.Tensor,
+            target_scores_sum: torch.Tensor,
+            fg_mask: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Compute IoU and DFL losses for rotated bounding boxes."""
         weight = target_scores.sum(-1)[fg_mask].unsqueeze(-1)
@@ -181,7 +209,7 @@ class KeypointLoss(nn.Module):
         self.sigmas = sigmas
 
     def forward(
-        self, pred_kpts: torch.Tensor, gt_kpts: torch.Tensor, kpt_mask: torch.Tensor, area: torch.Tensor
+            self, pred_kpts: torch.Tensor, gt_kpts: torch.Tensor, kpt_mask: torch.Tensor, area: torch.Tensor
     ) -> torch.Tensor:
         """Calculate keypoint loss factor and Euclidean distance loss for keypoints."""
         d = (pred_kpts[..., 0] - gt_kpts[..., 0]).pow(2) + (pred_kpts[..., 1] - gt_kpts[..., 1]).pow(2)
@@ -395,7 +423,7 @@ class v8SegmentationLoss(v8DetectionLoss):
 
     @staticmethod
     def single_mask_loss(
-        gt_mask: torch.Tensor, pred: torch.Tensor, proto: torch.Tensor, xyxy: torch.Tensor, area: torch.Tensor
+            gt_mask: torch.Tensor, pred: torch.Tensor, proto: torch.Tensor, xyxy: torch.Tensor, area: torch.Tensor
     ) -> torch.Tensor:
         """Compute the instance segmentation loss for a single image.
 
@@ -418,16 +446,16 @@ class v8SegmentationLoss(v8DetectionLoss):
         return (crop_mask(loss, xyxy).mean(dim=(1, 2)) / area).sum()
 
     def calculate_segmentation_loss(
-        self,
-        fg_mask: torch.Tensor,
-        masks: torch.Tensor,
-        target_gt_idx: torch.Tensor,
-        target_bboxes: torch.Tensor,
-        batch_idx: torch.Tensor,
-        proto: torch.Tensor,
-        pred_masks: torch.Tensor,
-        imgsz: torch.Tensor,
-        overlap: bool,
+            self,
+            fg_mask: torch.Tensor,
+            masks: torch.Tensor,
+            target_gt_idx: torch.Tensor,
+            target_bboxes: torch.Tensor,
+            batch_idx: torch.Tensor,
+            proto: torch.Tensor,
+            pred_masks: torch.Tensor,
+            imgsz: torch.Tensor,
+            overlap: bool,
     ) -> torch.Tensor:
         """Calculate the loss for instance segmentation.
 
@@ -572,14 +600,14 @@ class v8PoseLoss(v8DetectionLoss):
         return y
 
     def calculate_keypoints_loss(
-        self,
-        masks: torch.Tensor,
-        target_gt_idx: torch.Tensor,
-        keypoints: torch.Tensor,
-        batch_idx: torch.Tensor,
-        stride_tensor: torch.Tensor,
-        target_bboxes: torch.Tensor,
-        pred_kpts: torch.Tensor,
+            self,
+            masks: torch.Tensor,
+            target_gt_idx: torch.Tensor,
+            keypoints: torch.Tensor,
+            batch_idx: torch.Tensor,
+            stride_tensor: torch.Tensor,
+            target_bboxes: torch.Tensor,
+            pred_kpts: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Calculate the keypoints loss for the model.
 
@@ -753,7 +781,7 @@ class v8OBBLoss(v8DetectionLoss):
         return loss * batch_size, loss.detach()  # loss(box, cls, dfl)
 
     def bbox_decode(
-        self, anchor_points: torch.Tensor, pred_dist: torch.Tensor, pred_angle: torch.Tensor
+            self, anchor_points: torch.Tensor, pred_dist: torch.Tensor, pred_angle: torch.Tensor
     ) -> torch.Tensor:
         """Decode predicted object bounding box coordinates from anchor points and distribution.
 

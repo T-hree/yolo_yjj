@@ -15,11 +15,11 @@ import torch
 from ultralytics.utils import LOGGER, DataExportMixin, SimpleClass, TryExcept, checks, plt_settings
 
 OKS_SIGMA = (
-    np.array(
-        [0.26, 0.25, 0.25, 0.35, 0.35, 0.79, 0.79, 0.72, 0.72, 0.62, 0.62, 1.07, 1.07, 0.87, 0.87, 0.89, 0.89],
-        dtype=np.float32,
-    )
-    / 10.0
+        np.array(
+            [0.26, 0.25, 0.25, 0.35, 0.35, 0.79, 0.79, 0.72, 0.72, 0.62, 0.62, 1.07, 1.07, 0.87, 0.87, 0.89, 0.89],
+            dtype=np.float32,
+        )
+        / 10.0
 )
 
 
@@ -41,7 +41,7 @@ def bbox_ioa(box1: np.ndarray, box2: np.ndarray, iou: bool = False, eps: float =
 
     # Intersection area
     inter_area = (np.minimum(b1_x2[:, None], b2_x2) - np.maximum(b1_x1[:, None], b2_x1)).clip(0) * (
-        np.minimum(b1_y2[:, None], b2_y2) - np.maximum(b1_y1[:, None], b2_y1)
+            np.minimum(b1_y2[:, None], b2_y2) - np.maximum(b1_y1[:, None], b2_y1)
     ).clip(0)
 
     # Box2 area
@@ -78,13 +78,13 @@ def box_iou(box1: torch.Tensor, box2: torch.Tensor, eps: float = 1e-7) -> torch.
 
 
 def bbox_iou(
-    box1: torch.Tensor,
-    box2: torch.Tensor,
-    xywh: bool = True,
-    GIoU: bool = False,
-    DIoU: bool = False,
-    CIoU: bool = False,
-    eps: float = 1e-7,
+        box1: torch.Tensor,
+        box2: torch.Tensor,
+        xywh: bool = True,
+        GIoU: bool = False,
+        DIoU: bool = False,
+        CIoU: bool = False,
+        eps: float = 1e-7,
 ) -> torch.Tensor:
     """Calculate the Intersection over Union (IoU) between bounding boxes.
 
@@ -119,7 +119,7 @@ def bbox_iou(
 
     # Intersection area
     inter = (b1_x2.minimum(b2_x2) - b1_x1.maximum(b2_x1)).clamp_(0) * (
-        b1_y2.minimum(b2_y2) - b1_y1.maximum(b2_y1)
+            b1_y2.minimum(b2_y2) - b1_y1.maximum(b2_y1)
     ).clamp_(0)
 
     # Union Area
@@ -133,10 +133,10 @@ def bbox_iou(
         if CIoU or DIoU:  # Distance or Complete IoU https://arxiv.org/abs/1911.08287v1
             c2 = cw.pow(2) + ch.pow(2) + eps  # convex diagonal squared
             rho2 = (
-                (b2_x1 + b2_x2 - b1_x1 - b1_x2).pow(2) + (b2_y1 + b2_y2 - b1_y1 - b1_y2).pow(2)
-            ) / 4  # center dist**2
+                           (b2_x1 + b2_x2 - b1_x1 - b1_x2).pow(2) + (b2_y1 + b2_y2 - b1_y1 - b1_y2).pow(2)
+                   ) / 4  # center dist**2
             if CIoU:  # https://github.com/Zzh-tju/DIoU-SSD-pytorch/blob/master/utils/box/box_utils.py#L47
-                v = (4 / math.pi**2) * ((w2 / h2).atan() - (w1 / h1).atan()).pow(2)
+                v = (4 / math.pi ** 2) * ((w2 / h2).atan() - (w1 / h1).atan()).pow(2)
                 with torch.no_grad():
                     alpha = v / (v - iou + (1 + eps))
                 return iou - (rho2 / c2 + v * alpha)  # CIoU
@@ -145,6 +145,56 @@ def bbox_iou(
         return iou - (c_area - union) / c_area  # GIoU https://arxiv.org/pdf/1902.09630.pdf
     return iou  # IoU
 
+
+
+def nwd_loss(box1, box2, xywh=True, eps=1e-7):
+    """
+    Calculate Normalized Gaussian Wasserstein Distance (NWD) Loss.
+
+    Args:
+        box1 (torch.Tensor): Predicted bboxes, shape (N, 4).
+        box2 (torch.Tensor): Target bboxes, shape (N, 4).
+        xywh (bool): If True, input format is [x, y, w, h]. If False, [x1, y1, x2, y2].
+        eps (float): Small value to avoid division by zero.
+
+    Returns:
+        (torch.Tensor): NWD Loss value, range [0, 1].
+    """
+    # 1. 统一转为 xywh 格式 (中心点x, 中心点y, 宽, 高)
+    if not xywh:
+        b1_x1, b1_y1, b1_x2, b1_y2 = box1.chunk(4, -1)
+        b2_x1, b2_y1, b2_x2, b2_y2 = box2.chunk(4, -1)
+        w1, h1 = b1_x2 - b1_x1, b1_y2 - b1_y1 + eps
+        w2, h2 = b2_x2 - b2_x1, b2_y2 - b2_y1 + eps
+        b1_cx, b1_cy = (b1_x1 + b1_x2) / 2, (b1_y1 + b1_y2) / 2
+        b2_cx, b2_cy = (b2_x1 + b2_x2) / 2, (b2_y1 + b2_y2) / 2
+    else:
+        b1_cx, b1_cy, w1, h1 = box1.chunk(4, -1)
+        b2_cx, b2_cy, w2, h2 = box2.chunk(4, -1)
+
+    # 2. 计算 Wasserstein 距离 (W2) 的平方
+    # 公式: W2^2 = ||m1-m2||^2 + ||Sigma1^1/2 - Sigma2^1/2||_F^2
+    # 对于水平框，简化为: (cx1-cx2)^2 + (cy1-cy2)^2 + ((w1-w2)^2 + (h1-h2)^2)/4
+
+    # 这里的常数 C 通常取 12.0 左右，与数据集有关，一般 11.5-12.5 均可
+    constant = 12.0
+
+    p1 = torch.cat([b1_cx, b1_cy, w1 / 2, h1 / 2], -1)
+    p2 = torch.cat([b2_cx, b2_cy, w2 / 2, h2 / 2], -1)
+
+    dist_2 = torch.pow(p1[..., :2] - p2[..., :2], 2).sum(dim=-1) + \
+             torch.pow(p1[..., 2:] - p2[..., 2:], 2).sum(dim=-1)
+
+    # 3. 计算 NWD
+    # NWD = exp(- sqrt(W2^2) / C) -> 论文中简化写法直接用距离
+    # 为了数值稳定性，直接使用: exp( - dist / C )
+    nwd = torch.exp(-1 * torch.sqrt(dist_2 + eps) / constant)
+
+    # 4. 返回 Loss (1 - NWD)
+    return 1.0 - nwd
+
+
+# ================= 代码结束 =================
 
 def mask_iou(mask1: torch.Tensor, mask2: torch.Tensor, eps: float = 1e-7) -> torch.Tensor:
     """Calculate masks IoU.
@@ -165,7 +215,7 @@ def mask_iou(mask1: torch.Tensor, mask2: torch.Tensor, eps: float = 1e-7) -> tor
 
 
 def kpt_iou(
-    kpt1: torch.Tensor, kpt2: torch.Tensor, area: torch.Tensor, sigma: list[float], eps: float = 1e-7
+        kpt1: torch.Tensor, kpt2: torch.Tensor, area: torch.Tensor, sigma: list[float], eps: float = 1e-7
 ) -> torch.Tensor:
     """Calculate Object Keypoint Similarity (OKS).
 
@@ -230,21 +280,22 @@ def probiou(obb1: torch.Tensor, obb2: torch.Tensor, CIoU: bool = False, eps: flo
     a2, b2, c2 = _get_covariance_matrix(obb2)
 
     t1 = (
-        ((a1 + a2) * (y1 - y2).pow(2) + (b1 + b2) * (x1 - x2).pow(2)) / ((a1 + a2) * (b1 + b2) - (c1 + c2).pow(2) + eps)
-    ) * 0.25
+                 ((a1 + a2) * (y1 - y2).pow(2) + (b1 + b2) * (x1 - x2).pow(2)) / (
+                     (a1 + a2) * (b1 + b2) - (c1 + c2).pow(2) + eps)
+         ) * 0.25
     t2 = (((c1 + c2) * (x2 - x1) * (y1 - y2)) / ((a1 + a2) * (b1 + b2) - (c1 + c2).pow(2) + eps)) * 0.5
     t3 = (
-        ((a1 + a2) * (b1 + b2) - (c1 + c2).pow(2))
-        / (4 * ((a1 * b1 - c1.pow(2)).clamp_(0) * (a2 * b2 - c2.pow(2)).clamp_(0)).sqrt() + eps)
-        + eps
-    ).log() * 0.5
+                 ((a1 + a2) * (b1 + b2) - (c1 + c2).pow(2))
+                 / (4 * ((a1 * b1 - c1.pow(2)).clamp_(0) * (a2 * b2 - c2.pow(2)).clamp_(0)).sqrt() + eps)
+                 + eps
+         ).log() * 0.5
     bd = (t1 + t2 + t3).clamp(eps, 100.0)
     hd = (1.0 - (-bd).exp() + eps).sqrt()
     iou = 1 - hd
     if CIoU:  # only include the wh aspect ratio part
         w1, h1 = obb1[..., 2:4].split(1, dim=-1)
         w2, h2 = obb2[..., 2:4].split(1, dim=-1)
-        v = (4 / math.pi**2) * ((w2 / h2).atan() - (w1 / h1).atan()).pow(2)
+        v = (4 / math.pi ** 2) * ((w2 / h2).atan() - (w1 / h1).atan()).pow(2)
         with torch.no_grad():
             alpha = v / (v - iou + (1 + eps))
         return iou - v * alpha  # CIoU
@@ -274,14 +325,15 @@ def batch_probiou(obb1: torch.Tensor | np.ndarray, obb2: torch.Tensor | np.ndarr
     a2, b2, c2 = (x.squeeze(-1)[None] for x in _get_covariance_matrix(obb2))
 
     t1 = (
-        ((a1 + a2) * (y1 - y2).pow(2) + (b1 + b2) * (x1 - x2).pow(2)) / ((a1 + a2) * (b1 + b2) - (c1 + c2).pow(2) + eps)
-    ) * 0.25
+                 ((a1 + a2) * (y1 - y2).pow(2) + (b1 + b2) * (x1 - x2).pow(2)) / (
+                     (a1 + a2) * (b1 + b2) - (c1 + c2).pow(2) + eps)
+         ) * 0.25
     t2 = (((c1 + c2) * (x2 - x1) * (y1 - y2)) / ((a1 + a2) * (b1 + b2) - (c1 + c2).pow(2) + eps)) * 0.5
     t3 = (
-        ((a1 + a2) * (b1 + b2) - (c1 + c2).pow(2))
-        / (4 * ((a1 * b1 - c1.pow(2)).clamp_(0) * (a2 * b2 - c2.pow(2)).clamp_(0)).sqrt() + eps)
-        + eps
-    ).log() * 0.5
+                 ((a1 + a2) * (b1 + b2) - (c1 + c2).pow(2))
+                 / (4 * ((a1 * b1 - c1.pow(2)).clamp_(0) * (a2 * b2 - c2.pow(2)).clamp_(0)).sqrt() + eps)
+                 + eps
+         ).log() * 0.5
     bd = (t1 + t2 + t3).clamp(eps, 100.0)
     hd = (1.0 - (-bd).exp() + eps).sqrt()
     return 1 - hd
@@ -365,11 +417,11 @@ class ConfusionMatrix(DataExportMixin):
             self.matrix[p][t] += 1
 
     def process_batch(
-        self,
-        detections: dict[str, torch.Tensor],
-        batch: dict[str, Any],
-        conf: float = 0.25,
-        iou_thres: float = 0.45,
+            self,
+            detections: dict[str, torch.Tensor],
+            batch: dict[str, Any],
+            conf: float = 0.25,
+            iou_thres: float = 0.45,
     ) -> None:
         """Update confusion matrix for object detection task.
 
@@ -622,12 +674,12 @@ def smooth(y: np.ndarray, f: float = 0.05) -> np.ndarray:
 
 @plt_settings()
 def plot_pr_curve(
-    px: np.ndarray,
-    py: np.ndarray,
-    ap: np.ndarray,
-    save_dir: Path = Path("pr_curve.png"),
-    names: dict[int, str] = {},
-    on_plot=None,
+        px: np.ndarray,
+        py: np.ndarray,
+        ap: np.ndarray,
+        save_dir: Path = Path("pr_curve.png"),
+        names: dict[int, str] = {},
+        on_plot=None,
 ):
     """Plot precision-recall curve.
 
@@ -665,13 +717,13 @@ def plot_pr_curve(
 
 @plt_settings()
 def plot_mc_curve(
-    px: np.ndarray,
-    py: np.ndarray,
-    save_dir: Path = Path("mc_curve.png"),
-    names: dict[int, str] = {},
-    xlabel: str = "Confidence",
-    ylabel: str = "Metric",
-    on_plot=None,
+        px: np.ndarray,
+        py: np.ndarray,
+        save_dir: Path = Path("mc_curve.png"),
+        names: dict[int, str] = {},
+        xlabel: str = "Confidence",
+        ylabel: str = "Metric",
+        on_plot=None,
 ):
     """Plot metric-confidence curve.
 
@@ -741,16 +793,16 @@ def compute_ap(recall: list[float], precision: list[float]) -> tuple[float, np.n
 
 
 def ap_per_class(
-    tp: np.ndarray,
-    conf: np.ndarray,
-    pred_cls: np.ndarray,
-    target_cls: np.ndarray,
-    plot: bool = False,
-    on_plot=None,
-    save_dir: Path = Path(),
-    names: dict[int, str] = {},
-    eps: float = 1e-16,
-    prefix: str = "",
+        tp: np.ndarray,
+        conf: np.ndarray,
+        pred_cls: np.ndarray,
+        target_cls: np.ndarray,
+        plot: bool = False,
+        on_plot=None,
+        save_dir: Path = Path(),
+        names: dict[int, str] = {},
+        eps: float = 1e-16,
+        prefix: str = "",
 ) -> tuple:
     """Compute the average precision per class for object detection evaluation.
 
