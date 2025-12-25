@@ -133,25 +133,37 @@ class BboxLoss(nn.Module):
         # 1. 获取正样本的预测框和真实框
         pbox = pred_bboxes[fg_mask]
         tbox = target_bboxes[fg_mask]
-
-        # 2. 计算原有的 CIoU (保留它，作为基础回归)
+        # 1. 计算基础 CIoU
         iou = bbox_iou(pbox, tbox, xywh=False, CIoU=True)
+        l_iou = 1.0 - iou
 
-        # 3. 计算 NWD Loss (针对小目标优化)
-        # 注意：pred_bboxes 和 target_bboxes 在这里通常是 xyxy 格式，所以 xywh=False
+        # 2. 计算 NWD
         nwd = nwd_loss(pbox, tbox, xywh=False)
 
-        # if torch.rand(1) < 0.1:
-        #     print(f"\n[DEBUG] NWD Loss Check:")
-        #     print(f"   -> CIoU Mean: {iou.mean().item():.4f}")  # 原来的 Loss 均值
-        #     print(f"   -> NWD  Mean: {nwd.mean().item():.4f}")  # 你的新 Loss 均值
-        #     print(f"   -> NWD  Min:  {nwd.min().item():.4f}, Max: {nwd.max().item():.4f}")  # 看看有没有梯度爆炸或消失
-        # 4. 融合 Loss
-        # 策略：简单的加权融合。
-        # 你可以调节 nwd_ratio。对于小目标，NWD 很重要。
-        # 0.5 * CIoU_Loss + 0.5 * NWD_Loss
-        nwd_ratio = 0.5
-        loss_iou = ((1.0 - iou) * (1 - nwd_ratio) + nwd * nwd_ratio) * weight
+        # 3.智能区分大小目标
+        # 计算目标框的面积
+        # 注意：这里的 tbox 是特征图尺度下的坐标
+        t_w = tbox[..., 2] - tbox[..., 0]
+        t_h = tbox[..., 3] - tbox[..., 1]
+        t_area = t_w * t_h
+
+        # 设定一个阈值。在特征图尺度下，32x32像素的目标对应面积大概是：
+        # 如果 stride=8 (P3), 32px -> 4grid, area=16
+        # 如果 stride=32 (P5), 32px -> 1grid, area=1
+        # 折中一下，我们认为面积小于 16 的大概率是小目标 (对应 P3层 32x32, 或 P4层 64x64)
+        small_target_mask = t_area < 20.0
+
+        # 4. 组合 Loss
+        # 如果是小目标：使用 CIoU + NWD
+        # 如果是大目标：只使用 CIoU (NWD部分乘以0)
+        # 这里的 0.1 是 nwd_weight
+        loss_nwd_component = nwd * 0.1
+
+        # 利用 mask 进行筛选：只有 mask 为 True 的地方，loss_nwd_component 才生效
+        loss_nwd_final = torch.where(small_target_mask, loss_nwd_component, torch.zeros_like(nwd))
+
+        # 最终 Loss = CIoU + (只针对小目标的 NWD)
+        loss_iou = (l_iou + loss_nwd_final) * weight
         loss_iou = loss_iou.sum() / target_scores_sum
 
         # ================= 修改结束 =================

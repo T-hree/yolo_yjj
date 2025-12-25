@@ -177,7 +177,7 @@ def nwd_loss(box1, box2, xywh=True, eps=1e-7):
     # 对于水平框，简化为: (cx1-cx2)^2 + (cy1-cy2)^2 + ((w1-w2)^2 + (h1-h2)^2)/4
 
     # 这里的常数 C 通常取 12.0 左右，与数据集有关，一般 11.5-12.5 均可
-    constant = 12.0
+    constant = 10
 
     p1 = torch.cat([b1_cx, b1_cy, w1 / 2, h1 / 2], -1)
     p2 = torch.cat([b2_cx, b2_cy, w2 / 2, h2 / 2], -1)
