@@ -17,6 +17,18 @@ from .metrics import bbox_iou, probiou, nwd_loss
 from .tal import bbox2dist
 
 
+def calculate_nwd(box1, box2, constant=12.5):
+    # box1, box2: [x, y, w, h]
+    b1_x, b1_y, b1_w, b1_h = box1.chunk(4, -1)
+    b2_x, b2_y, b2_w, b2_h = box2.chunk(4, -1)
+
+    # W2 distance squared
+    w2 = (b1_x - b2_x).pow(2) + (b1_y - b2_y).pow(2) + \
+         ((b1_w - b2_w) / 2).pow(2) + ((b1_h - b2_h) / 2).pow(2)
+
+    return torch.exp(-torch.sqrt(w2.clamp(1e-7)) / constant)
+
+
 class VarifocalLoss(nn.Module):
     """Varifocal loss by Zhang et al.
 
@@ -125,50 +137,35 @@ class BboxLoss(nn.Module):
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Compute IoU and DFL losses for bounding boxes."""
         weight = target_scores.sum(-1)[fg_mask].unsqueeze(-1)
-        # iou = bbox_iou(pred_bboxes[fg_mask], target_bboxes[fg_mask], xywh=False, CIoU=True)
-        # loss_iou = ((1.0 - iou) * weight).sum() / target_scores_sum
+        iou = bbox_iou(pred_bboxes[fg_mask], target_bboxes[fg_mask], xywh=False, CIoU=True)
+        loss_iou = 1.0 - iou
 
-        # ================= 修改开始 =================
+        # ================= [新增 NWD 逻辑 Start] =================
+        # 2. 将框转为 xywh 以计算 NWD
+        pbox_wh = xyxy2xywh(pred_bboxes[fg_mask])
+        tbox_wh = xyxy2xywh(target_bboxes[fg_mask])
 
-        # 1. 获取正样本的预测框和真实框
-        pbox = pred_bboxes[fg_mask]
-        tbox = target_bboxes[fg_mask]
-        # 1. 计算基础 CIoU
-        # 假设 output (pbox) 已经解码为 xywh 格式
-        # tbox 也是 xywh 格式
+        # 3. 计算 NWD 值 (Constant 依然很关键，见下一步说明)
+        nwd = calculate_nwd(pbox_wh, tbox_wh, constant=10)
+        loss_nwd = 1.0 - nwd
 
-        # 1. 计算 CIoU/DIoU Loss
-        iou = bbox_iou(pbox, tbox, xywh=True, CIoU=True)
-        l_iou = 1.0 - iou
+        # 4. 智能融合 (基于目标面积的 Alpha 动态权重)
+        # 计算目标面积
+        t_area = tbox_wh[..., 2] * tbox_wh[..., 3]
 
-        # 2. 计算 NWD Loss (全局计算，不要加 if mask)
-        l_nwd = nwd_loss(pbox, tbox, xywh=True, constant=12)
+        # 设计一个平滑门控:
+        # 面积 < 32^2 (1024) -> alpha 趋向于 1 (重 NWD)
+        # 面积 > 64^2 (4096) -> alpha 趋向于 0 (重 IoU)
+        # 使用 Tanh 或 Sigmoid 制作软切换
+        alpha = 1.0 - torch.sigmoid((t_area - 512) / 256)
+        alpha = alpha.clamp(0.0, 1.0)  # 限制在 0~1
 
-        # 3. 动态加权策略 (Dynamic Weighting)
-        # 策略: 根据目标尺寸动态调整权重。小目标 NWD 权重高，大目标 IoU 权重高。
-        # 这种“软切换”比 if/else 硬切换更利于梯度下降。
+        # 5. 组合 Loss
+        # 小目标: loss = 0.8*NWD + 0.2*IoU
+        # 大目标: loss = 0.0*NWD + 1.0*IoU
+        combined_loss = alpha * loss_nwd + (1 - alpha) * loss_iou
 
-        # 计算真实框面积 (基于特征图尺度)
-        t_area = tbox[..., 2] * tbox[..., 3]
-
-        # 定义一个 alpha，当面积越小，alpha 越接近 1 (全用 NWD)
-        # 假设小目标面积 < 64 (8x8)
-        # 使用 Sigmoid 或 简单的线性插值做软门控
-        # 这里的 64 是经验值，对应 stride=8 时的 64px 物理尺寸
-        alpha = 1.0 - torch.sigmoid((t_area - 16) / 10)
-
-        # 限制 alpha 范围，避免极端情况
-        # alpha shape: (N,)
-        # 确保大目标也能有一点点 NWD 的梯度 (如 0.1), 小目标主要靠 NWD (如 0.9)
-        alpha = torch.clamp(alpha, min=0.0, max=1.0)
-
-        # 4. 融合 Loss
-        # 推荐比例: 小目标时 NWD 占 70%~100%
-        # 你的原始代码给了 0.1，这里建议直接混合
-        loss_box_component = (1.0 - alpha) * l_iou + alpha * l_nwd
-
-        loss_iou = loss_box_component.sum() / target_scores_sum
-
+        loss_iou += combined_loss.sum() / target_scores_sum
         # ================= 修改结束 =================
 
         # DFL loss
