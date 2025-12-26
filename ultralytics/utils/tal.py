@@ -9,6 +9,27 @@ from .ops import xywhr2xyxyxyxy
 from .torch_utils import TORCH_1_11
 
 
+def batch_nwd(bboxes1, bboxes2, constant=12.5):
+    # bboxes1: (B, A, 4) -> (B, A, 1, 4)
+    b1 = bboxes1.unsqueeze(2)
+    # bboxes2: (B, G, 4) -> (B, 1, G, 4)
+    b2 = bboxes2.unsqueeze(1)
+
+    # xyxy -> xywh (center + wh)
+    w1, h1 = b1[..., 2] - b1[..., 0], b1[..., 3] - b1[..., 1]
+    cx1, cy1 = (b1[..., 0] + b1[..., 2]) / 2, (b1[..., 1] + b1[..., 3]) / 2
+
+    w2, h2 = b2[..., 2] - b2[..., 0], b2[..., 3] - b2[..., 1]
+    cx2, cy2 = (b2[..., 0] + b2[..., 2]) / 2, (b2[..., 1] + b2[..., 3]) / 2
+
+    # Distance
+    center_dis_sq = (cx1 - cx2).pow(2) + (cy1 - cy2).pow(2)
+    wh_dis_sq = ((w1 - w2) / 2).pow(2) + ((h1 - h2) / 2).pow(2)
+    wasserstein_2 = center_dis_sq + wh_dis_sq
+
+    return torch.exp(-torch.sqrt(wasserstein_2.clamp(min=1e-7)) / constant)
+
+
 class TaskAlignedAssigner(nn.Module):
     """A task-aligned assigner for object detection.
 
@@ -147,37 +168,64 @@ class TaskAlignedAssigner(nn.Module):
         return mask_pos, align_metric, overlaps
 
     def get_box_metrics(self, pd_scores, pd_bboxes, gt_labels, gt_bboxes, mask_gt):
-        """Compute alignment metric given predicted and ground truth bounding boxes.
-
-        Args:
-            pd_scores (torch.Tensor): Predicted classification scores with shape (bs, num_total_anchors, num_classes).
-            pd_bboxes (torch.Tensor): Predicted bounding boxes with shape (bs, num_total_anchors, 4).
-            gt_labels (torch.Tensor): Ground truth labels with shape (bs, n_max_boxes, 1).
-            gt_bboxes (torch.Tensor): Ground truth boxes with shape (bs, n_max_boxes, 4).
-            mask_gt (torch.Tensor): Mask for valid ground truth boxes with shape (bs, n_max_boxes, h*w).
-
-        Returns:
-            align_metric (torch.Tensor): Alignment metric combining classification and localization.
-            overlaps (torch.Tensor): IoU overlaps between predicted and ground truth boxes.
         """
-        na = pd_bboxes.shape[-2]
-        mask_gt = mask_gt.bool()  # b, max_num_obj, h*w
-        overlaps = torch.zeros([self.bs, self.n_max_boxes, na], dtype=pd_bboxes.dtype, device=pd_bboxes.device)
-        bbox_scores = torch.zeros([self.bs, self.n_max_boxes, na], dtype=pd_scores.dtype, device=pd_scores.device)
+        Final Fix for 'selected index k out of range'.
+        Ensures output shape is (Batch, Max_GT, Anchors) so topk works.
+        """
+        nv = gt_labels.shape[1]
+        ind = torch.zeros([2, self.bs, nv], dtype=torch.long, device=pd_scores.device)
+        ind[0] = torch.arange(self.bs, device=pd_scores.device).view(-1, 1).repeat(1, nv)
+        ind[1] = gt_labels.long().squeeze(-1)  # (B, G)
+        bbox_scores = pd_scores[ind[0], :, ind[1]]
+        overlaps = bbox_iou(pd_bboxes.unsqueeze(2), gt_bboxes.unsqueeze(1), xywh=False, CIoU=True).squeeze(3).clamp(0)
+        overlaps = overlaps.permute(0, 2, 1)  # 强制转为 (B, G, A)
 
-        ind = torch.zeros([2, self.bs, self.n_max_boxes], dtype=torch.long)  # 2, b, max_num_obj
-        ind[0] = torch.arange(end=self.bs).view(-1, 1).expand(-1, self.n_max_boxes)  # b, max_num_obj
-        ind[1] = gt_labels.squeeze(-1)  # b, max_num_obj
-        # Get the scores of each grid for each gt cls
-        bbox_scores[mask_gt] = pd_scores[ind[0], :, ind[1]][mask_gt]  # b, max_num_obj, h*w
+        # batch_nwd 输出是 (B, A, G) -> 需要转置为 (B, G, A)
+        nwds = batch_nwd(pd_bboxes, gt_bboxes, constant=12.5)
+        nwds = nwds.permute(0, 2, 1)  # 强制转为 (B, G, A)
 
-        # (b, max_num_obj, 1, 4), (b, 1, h*w, 4)
-        pd_boxes = pd_bboxes.unsqueeze(1).expand(-1, self.n_max_boxes, -1, -1)[mask_gt]
-        gt_boxes = gt_bboxes.unsqueeze(2).expand(-1, -1, na, -1)[mask_gt]
-        overlaps[mask_gt] = self.iou_calculation(gt_boxes, pd_boxes)
+        # ---------------------------------------------------------
+        # 4. 混合与计算 Align Metric (B, G, A)
+        # ---------------------------------------------------------
+        # 此时 overlaps, nwds 都是 (B, G, A)，可以直接 max
+        combined_overlaps = torch.max(overlaps, nwds)
 
-        align_metric = bbox_scores.pow(self.alpha) * overlaps.pow(self.beta)
-        return align_metric, overlaps
+        # align_metric 也是 (B, G, A) -> Topk(dim=-1) 将在 A(34000) 上进行，不会报错
+        align_metric = bbox_scores.pow(self.alpha) * combined_overlaps.pow(self.beta)
+        return align_metric, combined_overlaps
+
+    # def get_box_metrics(self, pd_scores, pd_bboxes, gt_labels, gt_bboxes, mask_gt):
+    #     """Compute alignment metric given predicted and ground truth bounding boxes.
+    #
+    #     Args:
+    #         pd_scores (torch.Tensor): Predicted classification scores with shape (bs, num_total_anchors, num_classes).
+    #         pd_bboxes (torch.Tensor): Predicted bounding boxes with shape (bs, num_total_anchors, 4).
+    #         gt_labels (torch.Tensor): Ground truth labels with shape (bs, n_max_boxes, 1).
+    #         gt_bboxes (torch.Tensor): Ground truth boxes with shape (bs, n_max_boxes, 4).
+    #         mask_gt (torch.Tensor): Mask for valid ground truth boxes with shape (bs, n_max_boxes, h*w).
+    #
+    #     Returns:
+    #         align_metric (torch.Tensor): Alignment metric combining classification and localization.
+    #         overlaps (torch.Tensor): IoU overlaps between predicted and ground truth boxes.
+    #     """
+    #     na = pd_bboxes.shape[-2]
+    #     mask_gt = mask_gt.bool()  # b, max_num_obj, h*w
+    #     overlaps = torch.zeros([self.bs, self.n_max_boxes, na], dtype=pd_bboxes.dtype, device=pd_bboxes.device)
+    #     bbox_scores = torch.zeros([self.bs, self.n_max_boxes, na], dtype=pd_scores.dtype, device=pd_scores.device)
+    #
+    #     ind = torch.zeros([2, self.bs, self.n_max_boxes], dtype=torch.long)  # 2, b, max_num_obj
+    #     ind[0] = torch.arange(end=self.bs).view(-1, 1).expand(-1, self.n_max_boxes)  # b, max_num_obj
+    #     ind[1] = gt_labels.squeeze(-1)  # b, max_num_obj
+    #     # Get the scores of each grid for each gt cls
+    #     bbox_scores[mask_gt] = pd_scores[ind[0], :, ind[1]][mask_gt]  # b, max_num_obj, h*w
+    #
+    #     # (b, max_num_obj, 1, 4), (b, 1, h*w, 4)
+    #     pd_boxes = pd_bboxes.unsqueeze(1).expand(-1, self.n_max_boxes, -1, -1)[mask_gt]
+    #     gt_boxes = gt_bboxes.unsqueeze(2).expand(-1, -1, na, -1)[mask_gt]
+    #     overlaps[mask_gt] = self.iou_calculation(gt_boxes, pd_boxes)
+    #
+    #     align_metric = bbox_scores.pow(self.alpha) * overlaps.pow(self.beta)
+    #     return align_metric, overlaps
 
     def iou_calculation(self, gt_bboxes, pd_bboxes):
         """Calculate IoU for horizontal bounding boxes.
@@ -216,7 +264,7 @@ class TaskAlignedAssigner(nn.Module):
         ones = torch.ones_like(topk_idxs[:, :, :1], dtype=torch.int8, device=topk_idxs.device)
         for k in range(self.topk):
             # Expand topk_idxs for each value of k and add 1 at the specified positions
-            count_tensor.scatter_add_(-1, topk_idxs[:, :, k : k + 1], ones)
+            count_tensor.scatter_add_(-1, topk_idxs[:, :, k: k + 1], ones)
         # Filter invalid bboxes
         count_tensor.masked_fill_(count_tensor > 1, 0)
 

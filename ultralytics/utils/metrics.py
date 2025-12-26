@@ -147,52 +147,42 @@ def bbox_iou(
 
 
 
-def nwd_loss(box1, box2, xywh=True, eps=1e-7):
-    """
-    Calculate Normalized Gaussian Wasserstein Distance (NWD) Loss.
 
+def nwd_loss(pred_bboxes, gt_bboxes, xywh=True, constant=12.5):
+    """
+    Normalized Gaussian Wasserstein Distance (NWD) Loss
     Args:
-        box1 (torch.Tensor): Predicted bboxes, shape (N, 4).
-        box2 (torch.Tensor): Target bboxes, shape (N, 4).
-        xywh (bool): If True, input format is [x, y, w, h]. If False, [x1, y1, x2, y2].
-        eps (float): Small value to avoid division by zero.
-
-    Returns:
-        (torch.Tensor): NWD Loss value, range [0, 1].
+        pred_bboxes: 预测框 (N, 4)
+        gt_bboxes: 真实框 (N, 4)
+        xywh: 格式是否为 xywh, False则为 xyxy
+        constant: NWD常数, 小目标建议 10.0~12.5
     """
-    # 1. 统一转为 xywh 格式 (中心点x, 中心点y, 宽, 高)
     if not xywh:
-        b1_x1, b1_y1, b1_x2, b1_y2 = box1.chunk(4, -1)
-        b2_x1, b2_y1, b2_x2, b2_y2 = box2.chunk(4, -1)
-        w1, h1 = b1_x2 - b1_x1, b1_y2 - b1_y1 + eps
-        w2, h2 = b2_x2 - b2_x1, b2_y2 - b2_y1 + eps
-        b1_cx, b1_cy = (b1_x1 + b1_x2) / 2, (b1_y1 + b1_y2) / 2
-        b2_cx, b2_cy = (b2_x1 + b2_x2) / 2, (b2_y1 + b2_y2) / 2
+        # 转 xyxy -> xywh
+        b1_x1, b1_y1, b1_x2, b1_y2 = pred_bboxes.chunk(4, -1)
+        b2_x1, b2_y1, b2_x2, b2_y2 = gt_bboxes.chunk(4, -1)
+
+        w1, h1 = b1_x2 - b1_x1, b1_y2 - b1_y1
+        w2, h2 = b2_x2 - b2_x1, b2_y2 - b2_y1
+        cx1, cy1 = (b1_x1 + b1_x2) / 2, (b1_y1 + b1_y2) / 2
+        cx2, cy2 = (b2_x1 + b2_x2) / 2, (b2_y1 + b2_y2) / 2
     else:
-        b1_cx, b1_cy, w1, h1 = box1.chunk(4, -1)
-        b2_cx, b2_cy, w2, h2 = box2.chunk(4, -1)
+        cx1, cy1, w1, h1 = pred_bboxes.chunk(4, -1)
+        cx2, cy2, w2, h2 = gt_bboxes.chunk(4, -1)
 
-    # 2. 计算 Wasserstein 距离 (W2) 的平方
-    # 公式: W2^2 = ||m1-m2||^2 + ||Sigma1^1/2 - Sigma2^1/2||_F^2
-    # 对于水平框，简化为: (cx1-cx2)^2 + (cy1-cy2)^2 + ((w1-w2)^2 + (h1-h2)^2)/4
+    # 这里的关键是计算 Wasserstein 距离的平方
+    # 对于高斯分布: W2^2 = ||m1-m2||^2 + ||Sigma1^1/2 - Sigma2^1/2||_F^2
+    # 简化为: 中心点距离平方 + ((w1-w2)/2)^2 + ((h1-h2)/2)^2
 
-    # 这里的常数 C 通常取 12.0 左右，与数据集有关，一般 11.5-12.5 均可
-    constant = 10
+    center_dis_sq = (cx1 - cx2).pow(2) + (cy1 - cy2).pow(2)
+    wh_dis_sq = ((w1 - w2) / 2).pow(2) + ((h1 - h2) / 2).pow(2)
 
-    p1 = torch.cat([b1_cx, b1_cy, w1 / 2, h1 / 2], -1)
-    p2 = torch.cat([b2_cx, b2_cy, w2 / 2, h2 / 2], -1)
+    wasserstein_2 = center_dis_sq + wh_dis_sq
 
-    dist_2 = torch.pow(p1[..., :2] - p2[..., :2], 2).sum(dim=-1) + \
-             torch.pow(p1[..., 2:] - p2[..., 2:], 2).sum(dim=-1)
+    # NWD 计算
+    nwd = torch.exp(-torch.sqrt(wasserstein_2 + 1e-7) / constant)
 
-    # 3. 计算 NWD
-    # NWD = exp(- sqrt(W2^2) / C) -> 论文中简化写法直接用距离
-    # 为了数值稳定性，直接使用: exp( - dist / C )
-    nwd = torch.exp(-1 * torch.sqrt(dist_2 + eps) / constant)
-
-    # 4. 返回 Loss (1 - NWD)
     return 1.0 - nwd
-
 
 # ================= 代码结束 =================
 

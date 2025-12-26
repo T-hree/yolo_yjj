@@ -134,37 +134,40 @@ class BboxLoss(nn.Module):
         pbox = pred_bboxes[fg_mask]
         tbox = target_bboxes[fg_mask]
         # 1. 计算基础 CIoU
-        iou = bbox_iou(pbox, tbox, xywh=False, CIoU=True)
+        # 假设 output (pbox) 已经解码为 xywh 格式
+        # tbox 也是 xywh 格式
+
+        # 1. 计算 CIoU/DIoU Loss
+        iou = bbox_iou(pbox, tbox, xywh=True, CIoU=True)
         l_iou = 1.0 - iou
 
-        # 2. 计算 NWD
-        nwd = nwd_loss(pbox, tbox, xywh=False)
+        # 2. 计算 NWD Loss (全局计算，不要加 if mask)
+        l_nwd = nwd_loss(pbox, tbox, xywh=True, constant=12)
 
-        # 3.智能区分大小目标
-        # 计算目标框的面积
-        # 注意：这里的 tbox 是特征图尺度下的坐标
-        t_w = tbox[..., 2] - tbox[..., 0]
-        t_h = tbox[..., 3] - tbox[..., 1]
-        t_area = t_w * t_h
+        # 3. 动态加权策略 (Dynamic Weighting)
+        # 策略: 根据目标尺寸动态调整权重。小目标 NWD 权重高，大目标 IoU 权重高。
+        # 这种“软切换”比 if/else 硬切换更利于梯度下降。
 
-        # 设定一个阈值。在特征图尺度下，32x32像素的目标对应面积大概是：
-        # 如果 stride=8 (P3), 32px -> 4grid, area=16
-        # 如果 stride=32 (P5), 32px -> 1grid, area=1
-        # 折中一下，我们认为面积小于 16 的大概率是小目标 (对应 P3层 32x32, 或 P4层 64x64)
-        small_target_mask = t_area < 20.0
+        # 计算真实框面积 (基于特征图尺度)
+        t_area = tbox[..., 2] * tbox[..., 3]
 
-        # 4. 组合 Loss
-        # 如果是小目标：使用 CIoU + NWD
-        # 如果是大目标：只使用 CIoU (NWD部分乘以0)
-        # 这里的 0.1 是 nwd_weight
-        loss_nwd_component = nwd * 0.1
+        # 定义一个 alpha，当面积越小，alpha 越接近 1 (全用 NWD)
+        # 假设小目标面积 < 64 (8x8)
+        # 使用 Sigmoid 或 简单的线性插值做软门控
+        # 这里的 64 是经验值，对应 stride=8 时的 64px 物理尺寸
+        alpha = 1.0 - torch.sigmoid((t_area - 16) / 10)
 
-        # 利用 mask 进行筛选：只有 mask 为 True 的地方，loss_nwd_component 才生效
-        loss_nwd_final = torch.where(small_target_mask, loss_nwd_component, torch.zeros_like(nwd))
+        # 限制 alpha 范围，避免极端情况
+        # alpha shape: (N,)
+        # 确保大目标也能有一点点 NWD 的梯度 (如 0.1), 小目标主要靠 NWD (如 0.9)
+        alpha = torch.clamp(alpha, min=0.0, max=1.0)
 
-        # 最终 Loss = CIoU + (只针对小目标的 NWD)
-        loss_iou = (l_iou + loss_nwd_final) * weight
-        loss_iou = loss_iou.sum() / target_scores_sum
+        # 4. 融合 Loss
+        # 推荐比例: 小目标时 NWD 占 70%~100%
+        # 你的原始代码给了 0.1，这里建议直接混合
+        loss_box_component = (1.0 - alpha) * l_iou + alpha * l_nwd
+
+        loss_iou = loss_box_component.sum() / target_scores_sum
 
         # ================= 修改结束 =================
 
