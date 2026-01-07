@@ -13,20 +13,41 @@ from ultralytics.utils.ops import crop_mask, xywh2xyxy, xyxy2xywh
 from ultralytics.utils.tal import RotatedTaskAlignedAssigner, TaskAlignedAssigner, dist2bbox, dist2rbox, make_anchors
 from ultralytics.utils.torch_utils import autocast
 
-from .metrics import bbox_iou, probiou, nwd_loss
+from .metrics import bbox_iou, probiou
 from .tal import bbox2dist
 
+import torch
 
-def calculate_nwd(box1, box2, constant=12.5):
-    # box1, box2: [x, y, w, h]
-    b1_x, b1_y, b1_w, b1_h = box1.chunk(4, -1)
-    b2_x, b2_y, b2_w, b2_h = box2.chunk(4, -1)
 
-    # W2 distance squared
-    w2 = (b1_x - b2_x).pow(2) + (b1_y - b2_y).pow(2) + \
-         ((b1_w - b2_w) / 2).pow(2) + ((b1_h - b2_h) / 2).pow(2)
+def calculate_nwd_loss(pred_bboxes, target_bboxes, C=12.8, reduce=True):
+    """
+    NWD Loss tailored for YOLO11.
+    Args:
+        pred_bboxes: [N, 4] (x1, y1, x2, y2)
+        target_bboxes: [N, 4] (x1, y1, x2, y2)
+        C: Constant (default 12.8 for pixel scale)
+    """
+    # 1. 格式转换 xyxy -> cx, cy, w, h
+    b1_x1, b1_y1, b1_x2, b1_y2 = pred_bboxes.chunk(4, -1)
+    b1_cx, b1_cy = (b1_x1 + b1_x2) / 2, (b1_y1 + b1_y2) / 2
+    b1_w, b1_h = b1_x2 - b1_x1, b1_y2 - b1_y1
 
-    return torch.exp(-torch.sqrt(w2.clamp(1e-7)) / constant)
+    b2_x1, b2_y1, b2_x2, b2_y2 = target_bboxes.chunk(4, -1)
+    b2_cx, b2_cy = (b2_x1 + b2_x2) / 2, (b2_y1 + b2_y2) / 2
+    b2_w, b2_h = b2_x2 - b2_x1, b2_y2 - b2_y1
+
+    # 2. Wasserstein 距离 (Gaussian modeling)
+    # w2^2 = ||m1-m2||^2 + ||E1^1/2 - E2^1/2||^2_F (simplified for diagonal covariance)
+    w2_sq = (b1_cx - b2_cx).pow(2) + \
+            (b1_cy - b2_cy).pow(2) + \
+            ((b1_w - b2_w) / 2).pow(2) + \
+            ((b1_h - b2_h) / 2).pow(2)
+
+    # 3. NWD 计算 (防止除零)
+    nwd = torch.exp(-torch.sqrt(w2_sq) / (C + 1e-7))
+
+    # 4. Return Loss (1 - NWD)
+    return 1.0 - nwd
 
 
 class VarifocalLoss(nn.Module):
@@ -118,12 +139,11 @@ class DFLoss(nn.Module):
 
 
 class BboxLoss(nn.Module):
-    """Criterion class for computing training losses for bounding boxes."""
-
-    def __init__(self, reg_max: int = 16):
-        """Initialize the BboxLoss module with regularization maximum and DFL settings."""
+    def __init__(self, reg_max: int = 16, imgsz: int = 640):
         super().__init__()
         self.dfl_loss = DFLoss(reg_max) if reg_max > 1 else None
+        # [AUDIT] 建议从配置中读取 imgsz，这里暂时硬编码默认值作为保护
+        self.imgsz = imgsz
 
     def forward(
             self,
@@ -135,40 +155,37 @@ class BboxLoss(nn.Module):
             target_scores_sum: torch.Tensor,
             fg_mask: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Compute IoU and DFL losses for bounding boxes."""
+
         weight = target_scores.sum(-1)[fg_mask].unsqueeze(-1)
+
+        # 1. 计算原有的 IoU Loss (保留用于大目标)
         iou = bbox_iou(pred_bboxes[fg_mask], target_bboxes[fg_mask], xywh=False, CIoU=True)
-        loss_iou = 1.0 - iou
+        loss_iou = ((1.0 - iou) * weight).sum() / target_scores_sum
 
-        # ================= [新增 NWD 逻辑 Start] =================
-        # 2. 将框转为 xywh 以计算 NWD
-        pbox_wh = xyxy2xywh(pred_bboxes[fg_mask])
-        tbox_wh = xyxy2xywh(target_bboxes[fg_mask])
+        # 2. [NEW] 计算 NWD Loss
+        # 筛选前景框
+        pbox_fg = pred_bboxes[fg_mask]
+        tbox_fg = target_bboxes[fg_mask]
 
-        # 3. 计算 NWD 值 (Constant 依然很关键，见下一步说明)
-        nwd = calculate_nwd(pbox_wh, tbox_wh, constant=10)
-        loss_nwd = 1.0 - nwd
+        # [CRITICAL FIX] 尺度自适应
+        # 检查是否为归一化坐标 (假设 max < 2.0 则为归一化)
+        if pbox_fg.numel() > 0 and pbox_fg.max() < 2.0:
+            scale = torch.tensor(self.imgsz, device=pbox_fg.device)
+            # 还原到像素尺度计算 NWD
+            nwd_l = calculate_nwd_loss(pbox_fg * scale, tbox_fg * scale, C=12.8)
+        else:
+            # 已经是像素或特征图尺度 (需慎重，建议打印检查)
+            nwd_l = calculate_nwd_loss(pbox_fg, tbox_fg, C=12.8)
 
-        # 4. 智能融合 (基于目标面积的 Alpha 动态权重)
-        # 计算目标面积
-        t_area = tbox_wh[..., 2] * tbox_wh[..., 3]
+        # 3. 损失融合 (Weighted Sum)
+        # NWD 对小目标优化，IoU 保证大目标收敛
+        alpha = 0.5  # 建议根据实验调整，初始设为 0.5
+        loss_combined = alpha * (1.0 - iou) + (1 - alpha) * nwd_l
 
-        # 设计一个平滑门控:
-        # 面积 < 32^2 (1024) -> alpha 趋向于 1 (重 NWD)
-        # 面积 > 64^2 (4096) -> alpha 趋向于 0 (重 IoU)
-        # 使用 Tanh 或 Sigmoid 制作软切换
-        alpha = 1.0 - torch.sigmoid((t_area - 512) / 256)
-        alpha = alpha.clamp(0.0, 1.0)  # 限制在 0~1
-
-        # 5. 组合 Loss
-        # 小目标: loss = 0.8*NWD + 0.2*IoU
-        # 大目标: loss = 0.0*NWD + 1.0*IoU
-        combined_loss = alpha * loss_nwd + (1 - alpha) * loss_iou
-
-        loss_iou += combined_loss.sum() / target_scores_sum
-        # ================= 修改结束 =================
-
-        # DFL loss
+        # 替换原有的 loss_iou 计算方式
+        loss_iou = (loss_combined * weight).sum() / target_scores_sum
+        print(loss_iou, "*" * 80)
+        # DFL loss (保持不变)
         if self.dfl_loss:
             target_ltrb = bbox2dist(anchor_points, target_bboxes, self.dfl_loss.reg_max - 1)
             loss_dfl = self.dfl_loss(pred_dist[fg_mask].view(-1, self.dfl_loss.reg_max), target_ltrb[fg_mask]) * weight
@@ -238,7 +255,6 @@ class v8DetectionLoss:
         """Initialize v8DetectionLoss with model parameters and task-aligned assignment settings."""
         device = next(model.parameters()).device  # get model device
         h = model.args  # hyperparameters
-
         m = model.model[-1]  # Detect() module
         self.bce = nn.BCEWithLogitsLoss(reduction="none")
         self.hyp = h
@@ -251,7 +267,7 @@ class v8DetectionLoss:
         self.use_dfl = m.reg_max > 1
 
         self.assigner = TaskAlignedAssigner(topk=tal_topk, num_classes=self.nc, alpha=0.5, beta=6.0)
-        self.bbox_loss = BboxLoss(m.reg_max).to(device)
+        self.bbox_loss = BboxLoss(m.reg_max, h.imgsz).to(device)
         self.proj = torch.arange(m.reg_max, dtype=torch.float, device=device)
 
     def preprocess(self, targets: torch.Tensor, batch_size: int, scale_tensor: torch.Tensor) -> torch.Tensor:

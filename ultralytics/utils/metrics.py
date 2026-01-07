@@ -146,46 +146,6 @@ def bbox_iou(
     return iou  # IoU
 
 
-
-
-def nwd_loss(pred_bboxes, gt_bboxes, xywh=True, constant=12.5):
-    """
-    Normalized Gaussian Wasserstein Distance (NWD) Loss
-    Args:
-        pred_bboxes: 预测框 (N, 4)
-        gt_bboxes: 真实框 (N, 4)
-        xywh: 格式是否为 xywh, False则为 xyxy
-        constant: NWD常数, 小目标建议 10.0~12.5
-    """
-    if not xywh:
-        # 转 xyxy -> xywh
-        b1_x1, b1_y1, b1_x2, b1_y2 = pred_bboxes.chunk(4, -1)
-        b2_x1, b2_y1, b2_x2, b2_y2 = gt_bboxes.chunk(4, -1)
-
-        w1, h1 = b1_x2 - b1_x1, b1_y2 - b1_y1
-        w2, h2 = b2_x2 - b2_x1, b2_y2 - b2_y1
-        cx1, cy1 = (b1_x1 + b1_x2) / 2, (b1_y1 + b1_y2) / 2
-        cx2, cy2 = (b2_x1 + b2_x2) / 2, (b2_y1 + b2_y2) / 2
-    else:
-        cx1, cy1, w1, h1 = pred_bboxes.chunk(4, -1)
-        cx2, cy2, w2, h2 = gt_bboxes.chunk(4, -1)
-
-    # 这里的关键是计算 Wasserstein 距离的平方
-    # 对于高斯分布: W2^2 = ||m1-m2||^2 + ||Sigma1^1/2 - Sigma2^1/2||_F^2
-    # 简化为: 中心点距离平方 + ((w1-w2)/2)^2 + ((h1-h2)/2)^2
-
-    center_dis_sq = (cx1 - cx2).pow(2) + (cy1 - cy2).pow(2)
-    wh_dis_sq = ((w1 - w2) / 2).pow(2) + ((h1 - h2) / 2).pow(2)
-
-    wasserstein_2 = center_dis_sq + wh_dis_sq
-
-    # NWD 计算
-    nwd = torch.exp(-torch.sqrt(wasserstein_2 + 1e-7) / constant)
-
-    return 1.0 - nwd
-
-# ================= 代码结束 =================
-
 def mask_iou(mask1: torch.Tensor, mask2: torch.Tensor, eps: float = 1e-7) -> torch.Tensor:
     """Calculate masks IoU.
 
@@ -271,7 +231,7 @@ def probiou(obb1: torch.Tensor, obb2: torch.Tensor, CIoU: bool = False, eps: flo
 
     t1 = (
                  ((a1 + a2) * (y1 - y2).pow(2) + (b1 + b2) * (x1 - x2).pow(2)) / (
-                     (a1 + a2) * (b1 + b2) - (c1 + c2).pow(2) + eps)
+                 (a1 + a2) * (b1 + b2) - (c1 + c2).pow(2) + eps)
          ) * 0.25
     t2 = (((c1 + c2) * (x2 - x1) * (y1 - y2)) / ((a1 + a2) * (b1 + b2) - (c1 + c2).pow(2) + eps)) * 0.5
     t3 = (
@@ -316,7 +276,7 @@ def batch_probiou(obb1: torch.Tensor | np.ndarray, obb2: torch.Tensor | np.ndarr
 
     t1 = (
                  ((a1 + a2) * (y1 - y2).pow(2) + (b1 + b2) * (x1 - x2).pow(2)) / (
-                     (a1 + a2) * (b1 + b2) - (c1 + c2).pow(2) + eps)
+                 (a1 + a2) * (b1 + b2) - (c1 + c2).pow(2) + eps)
          ) * 0.25
     t2 = (((c1 + c2) * (x2 - x1) * (y1 - y2)) / ((a1 + a2) * (b1 + b2) - (c1 + c2).pow(2) + eps)) * 0.5
     t3 = (
