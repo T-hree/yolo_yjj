@@ -1,0 +1,26 @@
+# AI-TOD Dataset Configuration
+
+# Path to the dataset directory
+path: ./ai-tod
+
+# Training and validation image directories
+train: images/train
+val: images/val
+
+# Training and validation label directories
+train_labels: labels/train
+val_labels: labels/val
+
+# Number of classes
+nc: 8
+
+# Class names
+names:
+  0: airplane
+  1: ship
+  2: vehicle
+  3: court
+  4: harbor
+  5: stadium
+  6: bridge
+  7: airport
